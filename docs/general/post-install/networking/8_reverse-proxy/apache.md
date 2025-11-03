@@ -6,25 +6,41 @@ title: Apache
 "The [Apache HTTP Server Project](https://httpd.apache.org/) is an effort to develop and maintain an open-source HTTP server for modern operating systems including UNIX and Windows. The goal of this project is to provide a secure, efficient and extensible server that provides HTTP services in sync with the current HTTP standards."
 
 ```conf
+Define VHOSTNAME jellyfin.example.org
+Define SERVER_IP_ADDRESS 192.2.0.1
+
+<IfModule md_module>
+MDCertificateAuthority https://acme-v02.api.letsencrypt.org/directory
+MDCertificateAgreement accepted
+
+MDomain ${VHOSTNAME}
+</IfModule>
+
 <VirtualHost *:80>
-    ServerName DOMAIN_NAME
+    ServerName ${VHOSTNAME}
 
     # Comment to prevent HTTP to HTTPS redirect
     Redirect permanent / https://DOMAIN_NAME/
 
-    ErrorLog /var/log/apache2/DOMAIN_NAME-error.log
-    CustomLog /var/log/apache2/DOMAIN_NAME-access.log combined
+    ErrorLog /var/log/apache2/${VHOSTNAME}-error.log
+    CustomLog /var/log/apache2/${VHOSTNAME}-access.log combined
 </VirtualHost>
 
 # If you are not using a SSL certificate, replace the 'redirect'
 # line above with all lines below starting with 'Proxy'
-<IfModule mod_ssl.c>
+<IfModule ssl_module>
 <VirtualHost *:443>
-    ServerName DOMAIN_NAME
+    ServerName ${VHOSTNAME}
     # This folder exists just for certbot (You may have to create it, chown and chmod it to give apache permission to read it)
     DocumentRoot /var/www/html/jellyfin/public_html
 
     ProxyPreserveHost On
+    <IfModule http2_module>
+    Protocols h2 http/1.1
+    </IfModule>
+    <IfModule !http2_module>
+    Protocols http/1.1
+    </IfModule>
 
     # Letsencrypt's certbot will place a file in this folder when updating/verifying certs
     # This line will tell apache to not to use the proxy for this folder.
@@ -35,11 +51,8 @@ title: Apache
     RequestHeader set X-Forwarded-Port "443"
 
     # Apache should be able to know when to change protocols (between WebSocket and HTTP)
-    RewriteEngine On
-    RewriteCond %{HTTP:Upgrade} =websocket
-    RewriteRule /(.*) ws://SERVER_IP_ADDRESS:8096/socket/$1 [P,L]
-    RewriteCond %{HTTP:Upgrade} !=websocket
-    RewriteRule /(.*) http://SERVER_IP_ADDRESS:8096/$1 [P,L]
+    ProxyPass /socket/ http://${SERVER_IP_ADDRESS}:8096/socket/ upgrade=websocket
+    ProxyPass / http://${SERVER_IP_ADDRESS}:8096/
 
     # Sometimes, Jellyfin requires clients to empty their cache to display and function correctly.
     # This header tells clients not to keep any cache and is quite strict on that.
@@ -47,21 +60,26 @@ title: Apache
     # Header set Cache-Control "no-store, no-cache, must-revalidate, max-age=0"
 
     SSLEngine on
+    <IfModule !md_module>
     SSLCertificateFile /etc/letsencrypt/live/DOMAIN_NAME/fullchain.pem
     SSLCertificateKeyFile /etc/letsencrypt/live/DOMAIN_NAME/privkey.pem
-    Protocols h2 http/1.1
+    </IfModule>
 
     # Enable only strong encryption ciphers and prefer versions with Forward Secrecy
-    SSLCipherSuite HIGH:RC4-SHA:AES128-SHA:!aNULL:!MD5
-    SSLHonorCipherOrder on
-
-    # Disable insecure SSL and TLS versions
-    SSLProtocol all -SSLv2 -SSLv3 -TLSv1 -TLSv1.1
-
-    ErrorLog /var/log/apache2/DOMAIN_NAME-error.log
-    CustomLog /var/log/apache2/DOMAIN_NAME-access.log combined
+    # See https://ssl-config.mozilla.org/#server=apache&version=2.4.47&config=intermediate&openssl=3.0.0
+    SSLProtocol             -all +TLSv1.2 +TLSv1.3
+    SSLOpenSSLConfCmd       Curves X25519:prime256v1:secp384r1
+    SSLCipherSuite          ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384:DHE-RSA-CHACHA20-POLY1305
+    SSLHonorCipherOrder     off
+    SSLSessionTickets       off
+    
+    ErrorLog /var/log/apache2/${VHOSTNAME}-error.log
+    CustomLog /var/log/apache2/${VHOSTNAME}-access.log combined
 </VirtualHost>
 </IfModule>
+
+Undefine VHOSTNAME
+Undefine SERVER_IP_ADDRESS
 ```
 
 If you encounter errors, you may have to enable `mod_proxy`, `mod_ssl`, `proxy_wstunnel`, `http2`, `headers` and `remoteip` support manually.
@@ -78,7 +96,7 @@ Set the [base URL](../index.md#base-url) field in the Jellyfin server. This can 
 
 :::caution
 
-HTTP is insecure. The following configuration is provided for ease of use only. If you are planning on exposing your server over the Internet you should setup HTTPS. [Let's Encrypt](https://letsencrypt.org/getting-started/) can provide free TLS certificates which can be installed easily via [certbot](https://certbot.eff.org/).
+HTTP is insecure. The following configuration is provided for ease of use only. If you are planning on exposing your server over the Internet you should setup HTTPS. [Let's Encrypt](https://letsencrypt.org/getting-started/) can provide free TLS certificates which can be installed easily with Apache's [mod_md](https://httpd.apache.org/docs/2.4/mod/mod_md.html).
 
 :::
 
@@ -86,13 +104,8 @@ The following configuration can be saved in `/etc/httpd/conf/extra/jellyfin.conf
 
 ```conf
 # Jellyfin hosted on http(s)://DOMAIN_NAME/jellyfin
-<Location /jellyfin/socket>
-    ProxyPreserveHost On
-    ProxyPass "ws://127.0.0.1:8096/jellyfin/socket"
-    ProxyPassReverse "ws://127.0.0.1:8096/jellyfin/socket"
-</Location>
-<Location /jellyfin>
-    ProxyPass "http://127.0.0.1:8096/jellyfin"
-    ProxyPassReverse "http://127.0.0.1:8096/jellyfin"
-</Location>
+ProxyPreserveHost On
+ProxyPass "/jellyfin/socket" "http://${SERVER_IP_ADDRESS}:8096/jellyfin/socket" upgrade=websocket
+ProxyPass "/jellyfin" "http://${SERVER_IP_ADDRESS}:8096/jellyfin"
+ProxyPassReverse "/jellyfin" "http://${SERVER_IP_ADDRESS}:8096/jellyfin"
 ```
